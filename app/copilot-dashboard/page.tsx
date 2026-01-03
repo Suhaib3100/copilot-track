@@ -1,11 +1,14 @@
 "use client";
 
-import { useState, useEffect, useMemo } from "react";
+import React, { useMemo, useState } from "react";
 import {
   BarChart,
   Bar,
   LineChart,
   Line,
+  PieChart,
+  Pie,
+  Cell,
   XAxis,
   YAxis,
   CartesianGrid,
@@ -13,515 +16,834 @@ import {
   ResponsiveContainer,
   Legend,
 } from "recharts";
+import { useMetrics } from "./context/MetricsContext";
 import {
-  UserTotals,
-  CopilotMetricsResponse,
-  DailyMetrics,
-  filterByDateRange,
-  aggregateDailyTotals,
-} from "@/lib/copilotMetrics";
+  KPICard,
+  ChartCard,
+  RecommendationCard,
+  LoadingState,
+  ErrorState,
+} from "./components";
+import { CostConfig } from "@/lib/copilotMetrics";
 
-type SortKey = "login" | "totalPrompts" | "totalGenerations" | "totalAcceptances" | "totalLocAdded";
-type SortOrder = "asc" | "desc";
+// ============================================================================
+// CHART COLORS
+// ============================================================================
 
-export default function CopilotDashboard() {
-  const [data, setData] = useState<CopilotMetricsResponse | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [startDate, setStartDate] = useState<string>("");
-  const [endDate, setEndDate] = useState<string>("");
-  const [sortKey, setSortKey] = useState<SortKey>("totalPrompts");
-  const [sortOrder, setSortOrder] = useState<SortOrder>("desc");
+const COLORS = {
+  blue: "#3b82f6",
+  green: "#10b981",
+  purple: "#8b5cf6",
+  orange: "#f59e0b",
+  pink: "#ec4899",
+  cyan: "#06b6d4",
+  red: "#ef4444",
+};
 
-  useEffect(() => {
-    async function fetchData() {
-      try {
-        const response = await fetch("/api/copilot-metrics");
-        const result: CopilotMetricsResponse = await response.json();
+const PIE_COLORS = [COLORS.blue, COLORS.green, COLORS.purple, COLORS.orange, COLORS.pink];
 
-        if (!result.success) {
-          setError(result.error || "Failed to fetch metrics");
-        } else {
-          setData(result);
-          // Set default date range from the report
-          if (result.reportStartDay) setStartDate(result.reportStartDay);
-          if (result.reportEndDay) setEndDate(result.reportEndDay);
-        }
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "Failed to fetch data");
-      } finally {
-        setLoading(false);
-      }
-    }
+// ============================================================================
+// OVERVIEW PAGE COMPONENT
+// ============================================================================
 
-    fetchData();
-  }, []);
-
-  // Filter and sort users
-  const filteredUsers = useMemo(() => {
-    if (!data?.users) return [];
-
-    const filtered = filterByDateRange(data.users, startDate, endDate);
-
-    return [...filtered].sort((a, b) => {
-      const aVal = a[sortKey];
-      const bVal = b[sortKey];
-
-      if (typeof aVal === "string" && typeof bVal === "string") {
-        return sortOrder === "asc"
-          ? aVal.localeCompare(bVal)
-          : bVal.localeCompare(aVal);
-      }
-
-      return sortOrder === "asc"
-        ? (aVal as number) - (bVal as number)
-        : (bVal as number) - (aVal as number);
+export default function OverviewPage() {
+  const {
+    loading,
+    error,
+    filteredUsers,
+    dailyTotals,
+    orgTotals,
+    recommendations,
+    featureMetrics,
+    refreshData,
+    setSelectedUser,
+    costConfig,
+    simulatedCostConfig,
+    setSimulatedCostConfig,
+    simulatedOrgCost,
+    simulatedUsers,
+  } = useMetrics();
+  
+  // Cost simulator state
+  const [showSimulator, setShowSimulator] = useState(false);
+  const [simSeatPrice, setSimSeatPrice] = useState(costConfig?.seatPriceUSD || 19);
+  const [simIncludedRequests, setSimIncludedRequests] = useState(costConfig?.includedPremiumRequests || 300);
+  const [simRequestPrice, setSimRequestPrice] = useState(costConfig?.premiumRequestPriceUSD || 0.04);
+  
+  // Apply simulation
+  const handleApplySimulation = () => {
+    setSimulatedCostConfig({
+      seatPriceUSD: simSeatPrice,
+      includedPremiumRequests: simIncludedRequests,
+      premiumRequestPriceUSD: simRequestPrice,
+      usdToINR: costConfig?.usdToINR || 83.50,
     });
-  }, [data, startDate, endDate, sortKey, sortOrder]);
-
-  // Aggregate daily totals
-  const dailyTotals = useMemo(() => {
-    return aggregateDailyTotals(filteredUsers);
-  }, [filteredUsers]);
-
-  // Summary stats
-  const summary = useMemo(() => {
-    const activeUsers = filteredUsers.filter((u) => u.totalPrompts > 0).length;
-    const totalPrompts = filteredUsers.reduce((sum, u) => sum + u.totalPrompts, 0);
-    const totalGenerations = filteredUsers.reduce((sum, u) => sum + u.totalGenerations, 0);
-    const totalAcceptances = filteredUsers.reduce((sum, u) => sum + u.totalAcceptances, 0);
-    const totalLocAdded = filteredUsers.reduce((sum, u) => sum + u.totalLocAdded, 0);
-
-    return { activeUsers, totalPrompts, totalGenerations, totalAcceptances, totalLocAdded };
-  }, [filteredUsers]);
-
+  };
+  
+  // Reset simulation
+  const handleResetSimulation = () => {
+    setSimulatedCostConfig(null);
+    if (costConfig) {
+      setSimSeatPrice(costConfig.seatPriceUSD);
+      setSimIncludedRequests(costConfig.includedPremiumRequests);
+      setSimRequestPrice(costConfig.premiumRequestPriceUSD);
+    }
+  };
+  
+  // Get effective cost data (simulated or actual)
+  const effectiveOrgCost = simulatedOrgCost || orgTotals.cost;
+  const isSimulated = !!simulatedCostConfig;
+  
   // Top 10 users for bar chart
   const top10Users = useMemo(() => {
     return [...filteredUsers]
       .sort((a, b) => b.totalPrompts - a.totalPrompts)
       .slice(0, 10)
       .map((u) => ({
-        login: u.login,
+        login: u.login.length > 12 ? u.login.slice(0, 12) + "..." : u.login,
+        fullLogin: u.login,
         prompts: u.totalPrompts,
         acceptances: u.totalAcceptances,
         locAdded: u.totalLocAdded,
       }));
   }, [filteredUsers]);
-
-  const handleSort = (key: SortKey) => {
-    if (sortKey === key) {
-      setSortOrder(sortOrder === "asc" ? "desc" : "asc");
-    } else {
-      setSortKey(key);
-      setSortOrder("desc");
-    }
-  };
-
-  const SortIndicator = ({ columnKey }: { columnKey: SortKey }) => {
-    if (sortKey !== columnKey) return null;
-    return <span>{sortOrder === "asc" ? " ▲" : " ▼"}</span>;
-  };
-
+  
+  // Feature distribution for pie chart
+  const featureDistribution = useMemo(() => {
+    return featureMetrics.slice(0, 5).map((f) => ({
+      name: f.feature.charAt(0).toUpperCase() + f.feature.slice(1),
+      value: f.prompts,
+    }));
+  }, [featureMetrics]);
+  
+  // Handle loading and error states
   if (loading) {
-    return (
-      <div style={styles.loadingContainer}>
-        <div style={styles.spinner}></div>
-        <p>Loading Copilot metrics...</p>
-      </div>
-    );
+    return <LoadingState message="Loading Copilot metrics..." />;
   }
-
+  
   if (error) {
     return (
-      <div style={styles.errorContainer}>
-        <h2>❌ Error</h2>
-        <p>{error}</p>
-        <button onClick={() => window.location.reload()} style={styles.retryButton}>
-          Retry
-        </button>
-      </div>
+      <ErrorState 
+        title="Failed to load metrics"
+        message={error}
+        onRetry={refreshData}
+      />
     );
   }
-
+  
   return (
-    <div style={styles.container}>
-      <header style={styles.header}>
-        <h1 style={styles.title}>🤖 Copilot Analytics Dashboard</h1>
-        {data?.reportStartDay && data?.reportEndDay && (
-          <p style={styles.subtitle}>
-            Report period: {data.reportStartDay} to {data.reportEndDay}
+    <div style={styles.page}>
+      {/* Page Header */}
+      <div style={styles.pageHeader}>
+        <div>
+          <h1 style={styles.pageTitle}>Overview</h1>
+          <p style={styles.pageSubtitle}>
+            Organization-wide Copilot usage at a glance
           </p>
-        )}
-      </header>
-
-      {/* Date Filters */}
-      <section style={styles.filterSection}>
-        <h2 style={styles.sectionTitle}>📅 Date Filter</h2>
-        <div style={styles.filterRow}>
-          <div style={styles.filterGroup}>
-            <label htmlFor="startDate" style={styles.label}>Start Date</label>
-            <input
-              id="startDate"
-              type="date"
-              value={startDate}
-              onChange={(e) => setStartDate(e.target.value)}
-              style={styles.input}
-            />
-          </div>
-          <div style={styles.filterGroup}>
-            <label htmlFor="endDate" style={styles.label}>End Date</label>
-            <input
-              id="endDate"
-              type="date"
-              value={endDate}
-              onChange={(e) => setEndDate(e.target.value)}
-              style={styles.input}
-            />
-          </div>
-          <button
-            onClick={() => {
-              setStartDate(data?.reportStartDay || "");
-              setEndDate(data?.reportEndDay || "");
-            }}
-            style={styles.resetButton}
-          >
-            Reset
-          </button>
+        </div>
+      </div>
+      
+      {/* KPI Cards Grid */}
+      <section style={styles.kpiSection}>
+        <div style={styles.kpiGrid}>
+          <KPICard
+            title="Active Users"
+            value={orgTotals.activeUsers}
+            subtitle={`of ${orgTotals.totalUsers} total seats`}
+            icon={<UsersIcon />}
+            accentColor={COLORS.blue}
+          />
+          <KPICard
+            title="Avg Prompts / User"
+            value={orgTotals.avgPromptsPerUser}
+            subtitle="in selected period"
+            icon={<ChatIcon />}
+            accentColor={COLORS.purple}
+          />
+          <KPICard
+            title="Total Acceptances"
+            value={orgTotals.totalAcceptances}
+            subtitle={`${((orgTotals.avgAcceptanceRate || 0) * 100).toFixed(0)}% avg acceptance rate`}
+            icon={<CheckIcon />}
+            accentColor={COLORS.green}
+          />
+          <KPICard
+            title="AI Lines of Code"
+            value={orgTotals.totalLocAdded}
+            subtitle="added via Copilot"
+            icon={<CodeIcon />}
+            accentColor={COLORS.orange}
+          />
         </div>
       </section>
-
-      {/* Summary Cards */}
-      <section style={styles.summarySection}>
-        <h2 style={styles.sectionTitle}>📊 Summary</h2>
-        <div style={styles.cardGrid}>
-          <div style={styles.card}>
-            <div style={styles.cardValue}>{summary.activeUsers}</div>
-            <div style={styles.cardLabel}>Active Users</div>
+      
+      {/* Cost Analysis Section */}
+      {effectiveOrgCost && (
+        <section style={styles.costSection}>
+          <div style={styles.costHeader}>
+            <div>
+              <h2 style={styles.sectionTitle}>
+                💰 Cost Analysis {isSimulated && <span style={styles.simulatedBadge}>Simulated</span>}
+              </h2>
+              <p style={styles.sectionSubtitle}>Estimated monthly Copilot spend</p>
+            </div>
+            <button 
+              style={styles.simulatorToggle}
+              onClick={() => setShowSimulator(!showSimulator)}
+            >
+              {showSimulator ? "Hide Simulator" : "🧮 Open Simulator"}
+            </button>
           </div>
-          <div style={styles.card}>
-            <div style={styles.cardValue}>{summary.totalPrompts.toLocaleString()}</div>
-            <div style={styles.cardLabel}>Total Prompts</div>
+          
+          {/* Cost KPIs */}
+          <div style={styles.costGrid}>
+            <div style={styles.costCard}>
+              <div style={styles.costCardHeader}>
+                <span style={styles.costLabel}>Total Estimated Cost</span>
+                <DollarIcon />
+              </div>
+              <div style={styles.costValue}>
+                ${effectiveOrgCost.totalCostUSD.toFixed(2)}
+              </div>
+              <div style={styles.costInr}>
+                ₹{effectiveOrgCost.totalCostINR.toFixed(2)}
+              </div>
+            </div>
+            
+            <div style={styles.costCard}>
+              <div style={styles.costCardHeader}>
+                <span style={styles.costLabel}>Seat Costs</span>
+              </div>
+              <div style={styles.costValue}>
+                ${effectiveOrgCost.totalSeatCostUSD.toFixed(2)}
+              </div>
+              <div style={styles.costInr}>
+                ₹{effectiveOrgCost.totalSeatCostINR.toFixed(2)}
+              </div>
+              <div style={styles.costNote}>
+                {orgTotals.totalUsers} seats × ${costConfig?.seatPriceUSD || 19}
+              </div>
+            </div>
+            
+            <div style={styles.costCard}>
+              <div style={styles.costCardHeader}>
+                <span style={styles.costLabel}>Overage Costs</span>
+              </div>
+              <div style={{...styles.costValue, color: effectiveOrgCost.totalOverageCostUSD > 0 ? COLORS.orange : COLORS.green}}>
+                ${effectiveOrgCost.totalOverageCostUSD.toFixed(2)}
+              </div>
+              <div style={styles.costInr}>
+                ₹{effectiveOrgCost.totalOverageCostINR.toFixed(2)}
+              </div>
+              <div style={styles.costNote}>
+                Premium requests beyond {costConfig?.includedPremiumRequests || 300}/user
+              </div>
+            </div>
+            
+            <div style={styles.costCard}>
+              <div style={styles.costCardHeader}>
+                <span style={styles.costLabel}>Cost per Active User</span>
+              </div>
+              <div style={styles.costValue}>
+                ${effectiveOrgCost.avgCostPerActiveUserUSD.toFixed(2)}
+              </div>
+              <div style={styles.costInr}>
+                ₹{effectiveOrgCost.avgCostPerActiveUserINR.toFixed(2)}
+              </div>
+              <div style={styles.costNote}>
+                {orgTotals.activeUsers} active users
+              </div>
+            </div>
           </div>
-          <div style={styles.card}>
-            <div style={styles.cardValue}>{summary.totalGenerations.toLocaleString()}</div>
-            <div style={styles.cardLabel}>Total Generations</div>
+          
+          {/* Cost Simulator */}
+          {showSimulator && (
+            <div style={styles.simulator}>
+              <h3 style={styles.simulatorTitle}>💡 What-If Simulator</h3>
+              <p style={styles.simulatorDesc}>
+                Adjust pricing parameters to see how costs would change
+              </p>
+              
+              <div style={styles.simulatorGrid}>
+                <div style={styles.sliderGroup}>
+                  <label style={styles.sliderLabel}>
+                    Seat Price (USD): <strong>${simSeatPrice}</strong>
+                  </label>
+                  <input
+                    type="range"
+                    min="10"
+                    max="50"
+                    step="1"
+                    value={simSeatPrice}
+                    onChange={(e) => setSimSeatPrice(Number(e.target.value))}
+                    style={styles.slider}
+                  />
+                </div>
+                
+                <div style={styles.sliderGroup}>
+                  <label style={styles.sliderLabel}>
+                    Included Premium Requests: <strong>{simIncludedRequests}</strong>
+                  </label>
+                  <input
+                    type="range"
+                    min="100"
+                    max="1000"
+                    step="50"
+                    value={simIncludedRequests}
+                    onChange={(e) => setSimIncludedRequests(Number(e.target.value))}
+                    style={styles.slider}
+                  />
+                </div>
+                
+                <div style={styles.sliderGroup}>
+                  <label style={styles.sliderLabel}>
+                    Premium Request Price (USD): <strong>${simRequestPrice.toFixed(2)}</strong>
+                  </label>
+                  <input
+                    type="range"
+                    min="0.01"
+                    max="0.10"
+                    step="0.01"
+                    value={simRequestPrice}
+                    onChange={(e) => setSimRequestPrice(Number(e.target.value))}
+                    style={styles.slider}
+                  />
+                </div>
+              </div>
+              
+              <div style={styles.simulatorActions}>
+                <button style={styles.applyButton} onClick={handleApplySimulation}>
+                  Apply Simulation
+                </button>
+                <button style={styles.resetButton} onClick={handleResetSimulation}>
+                  Reset to Actual
+                </button>
+              </div>
+            </div>
+          )}
+          
+          {/* Top 5 Most Expensive Users */}
+          <div style={styles.expensiveUsersSection}>
+            <h3 style={styles.subsectionTitle}>Top 5 Most Expensive Users</h3>
+            <div style={styles.expensiveUsersList}>
+              {(isSimulated ? simulatedUsers : filteredUsers)
+                .filter(u => u.cost)
+                .sort((a, b) => (b.cost?.totalCostUSD || 0) - (a.cost?.totalCostUSD || 0))
+                .slice(0, 5)
+                .map((user, idx) => (
+                  <div 
+                    key={user.login} 
+                    style={styles.expensiveUserRow}
+                    onClick={() => setSelectedUser(user)}
+                  >
+                    <div style={styles.expensiveUserRank}>#{idx + 1}</div>
+                    <div style={styles.expensiveUserInfo}>
+                      <span style={styles.expensiveUserName}>{user.login}</span>
+                      <span style={styles.expensiveUserStats}>
+                        {user.totalPrompts} prompts • {user.cost?.overageRequests || 0} overage
+                      </span>
+                    </div>
+                    <div style={styles.expensiveUserCost}>
+                      <span style={styles.expensiveUserUSD}>
+                        ${user.cost?.totalCostUSD.toFixed(2)}
+                      </span>
+                      <span style={styles.expensiveUserINR}>
+                        ₹{user.cost?.totalCostINR.toFixed(2)}
+                      </span>
+                    </div>
+                  </div>
+                ))}
+            </div>
           </div>
-          <div style={styles.card}>
-            <div style={styles.cardValue}>{summary.totalAcceptances.toLocaleString()}</div>
-            <div style={styles.cardLabel}>Total Acceptances</div>
-          </div>
-          <div style={styles.card}>
-            <div style={styles.cardValue}>{summary.totalLocAdded.toLocaleString()}</div>
-            <div style={styles.cardLabel}>Lines of Code Added</div>
-          </div>
-        </div>
-      </section>
-
-      {/* Charts */}
+        </section>
+      )}
+      
+      {/* Charts Section */}
       <section style={styles.chartsSection}>
-        <h2 style={styles.sectionTitle}>📈 Charts</h2>
         <div style={styles.chartsGrid}>
-          {/* Bar Chart - Top 10 Users */}
-          <div style={styles.chartCard}>
-            <h3 style={styles.chartTitle}>Top 10 Users by Prompts</h3>
-            <div style={styles.chartContainer}>
-              <ResponsiveContainer width="100%" height={300}>
-                <BarChart data={top10Users} layout="vertical">
-                  <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis type="number" />
-                  <YAxis type="category" dataKey="login" width={100} tick={{ fontSize: 12 }} />
-                  <Tooltip />
-                  <Legend />
-                  <Bar dataKey="prompts" fill="#3b82f6" name="Prompts" />
-                  <Bar dataKey="acceptances" fill="#10b981" name="Acceptances" />
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
-          </div>
-
-          {/* Line Chart - Daily Prompts */}
-          <div style={styles.chartCard}>
-            <h3 style={styles.chartTitle}>Daily Prompts (All Users)</h3>
-            <div style={styles.chartContainer}>
-              <ResponsiveContainer width="100%" height={300}>
-                <LineChart data={dailyTotals}>
-                  <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis
-                    dataKey="day"
-                    tick={{ fontSize: 10 }}
-                    tickFormatter={(value) => value.slice(5)} // MM-DD
-                  />
-                  <YAxis />
-                  <Tooltip />
-                  <Legend />
-                  <Line
-                    type="monotone"
-                    dataKey="prompts"
-                    stroke="#3b82f6"
-                    name="Prompts"
-                    dot={false}
-                  />
-                  <Line
-                    type="monotone"
-                    dataKey="acceptances"
-                    stroke="#10b981"
-                    name="Acceptances"
-                    dot={false}
-                  />
-                </LineChart>
-              </ResponsiveContainer>
-            </div>
-          </div>
-
-          {/* Bar Chart - Lines of Code Added */}
-          <div style={styles.chartCard}>
-            <h3 style={styles.chartTitle}>Lines of Code Added (Top 10 Users)</h3>
-            <div style={styles.chartContainer}>
-              <ResponsiveContainer width="100%" height={300}>
-                <BarChart data={top10Users} layout="vertical">
-                  <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis type="number" />
-                  <YAxis type="category" dataKey="login" width={100} tick={{ fontSize: 12 }} />
-                  <Tooltip />
-                  <Bar dataKey="locAdded" fill="#f59e0b" name="Lines Added" />
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
-          </div>
+          {/* Top Users Bar Chart */}
+          <ChartCard 
+            title="Top 10 Users by Prompts"
+            subtitle="Click a bar to view user details"
+          >
+            <ResponsiveContainer width="100%" height={300}>
+              <BarChart 
+                data={top10Users} 
+                layout="vertical"
+                onClick={(data) => {
+                  const fullLogin = data?.activePayload?.[0]?.payload?.fullLogin;
+                  if (fullLogin) {
+                    const user = filteredUsers.find(
+                      u => u.login === fullLogin
+                    );
+                    if (user) setSelectedUser(user);
+                  }
+                }}
+              >
+                <CartesianGrid strokeDasharray="3 3" stroke="var(--border-subtle)" />
+                <XAxis type="number" tick={{ fill: "var(--text-muted)", fontSize: 11 }} stroke="var(--border-subtle)" />
+                <YAxis 
+                  type="category" 
+                  dataKey="login" 
+                  width={100} 
+                  tick={{ fill: "var(--text-secondary)", fontSize: 11 }}
+                  stroke="var(--border-subtle)"
+                />
+                <Tooltip 
+                  contentStyle={tooltipStyle}
+                  cursor={{ fill: "var(--bg-hover)" }}
+                />
+                <Legend />
+                <Bar dataKey="prompts" fill={COLORS.blue} name="Prompts" radius={[0, 4, 4, 0]} />
+                <Bar dataKey="acceptances" fill={COLORS.green} name="Acceptances" radius={[0, 4, 4, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          </ChartCard>
+          
+          {/* Daily Trends Line Chart */}
+          <ChartCard 
+            title="Daily Activity Trends"
+            subtitle="Prompts and acceptances over time"
+          >
+            <ResponsiveContainer width="100%" height={300}>
+              <LineChart data={dailyTotals}>
+                <CartesianGrid strokeDasharray="3 3" stroke="var(--border-subtle)" />
+                <XAxis 
+                  dataKey="day" 
+                  tick={{ fill: "var(--text-muted)", fontSize: 10 }}
+                  tickFormatter={(v) => v.slice(5)}
+                  stroke="var(--border-subtle)"
+                />
+                <YAxis tick={{ fill: "var(--text-muted)", fontSize: 11 }} stroke="var(--border-subtle)" />
+                <Tooltip contentStyle={tooltipStyle} />
+                <Legend />
+                <Line 
+                  type="monotone" 
+                  dataKey="prompts" 
+                  stroke={COLORS.blue} 
+                  name="Prompts"
+                  strokeWidth={2}
+                  dot={false}
+                  activeDot={{ r: 4 }}
+                />
+                <Line 
+                  type="monotone" 
+                  dataKey="acceptances" 
+                  stroke={COLORS.green} 
+                  name="Acceptances"
+                  strokeWidth={2}
+                  dot={false}
+                  activeDot={{ r: 4 }}
+                />
+                <Line 
+                  type="monotone" 
+                  dataKey="locAdded" 
+                  stroke={COLORS.orange} 
+                  name="LOC Added"
+                  strokeWidth={2}
+                  dot={false}
+                  activeDot={{ r: 4 }}
+                />
+              </LineChart>
+            </ResponsiveContainer>
+          </ChartCard>
+          
+          {/* Feature Distribution Pie Chart */}
+          <ChartCard 
+            title="Usage by Feature"
+            subtitle="Distribution of prompts by feature type"
+          >
+            <ResponsiveContainer width="100%" height={280}>
+              <PieChart>
+                <Pie
+                  data={featureDistribution}
+                  cx="50%"
+                  cy="50%"
+                  innerRadius={60}
+                  outerRadius={100}
+                  paddingAngle={2}
+                  dataKey="value"
+                  label={({ name, percent }) => `${name} ${(percent * 100).toFixed(0)}%`}
+                  labelLine={{ stroke: "var(--text-muted)" }}
+                >
+                  {featureDistribution.map((_, index) => (
+                    <Cell 
+                      key={`cell-${index}`} 
+                      fill={PIE_COLORS[index % PIE_COLORS.length]}
+                      stroke="var(--bg-primary)"
+                      strokeWidth={2}
+                    />
+                  ))}
+                </Pie>
+                <Tooltip contentStyle={tooltipStyle} />
+              </PieChart>
+            </ResponsiveContainer>
+          </ChartCard>
+          
+          {/* LOC Added Chart */}
+          <ChartCard 
+            title="Lines of Code Added"
+            subtitle="Top 10 users by AI-generated code"
+          >
+            <ResponsiveContainer width="100%" height={280}>
+              <BarChart data={top10Users} layout="vertical">
+                <CartesianGrid strokeDasharray="3 3" stroke="var(--border-subtle)" />
+                <XAxis type="number" tick={{ fill: "var(--text-muted)", fontSize: 11 }} stroke="var(--border-subtle)" />
+                <YAxis 
+                  type="category" 
+                  dataKey="login" 
+                  width={100} 
+                  tick={{ fill: "var(--text-secondary)", fontSize: 11 }}
+                  stroke="var(--border-subtle)"
+                />
+                <Tooltip contentStyle={tooltipStyle} />
+                <Bar dataKey="locAdded" fill={COLORS.orange} name="LOC Added" radius={[0, 4, 4, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          </ChartCard>
         </div>
       </section>
-
-      {/* Users Table */}
-      <section style={styles.tableSection}>
-        <h2 style={styles.sectionTitle}>👥 Users ({filteredUsers.length})</h2>
-        <div style={styles.tableWrapper}>
-          <table style={styles.table}>
-            <thead>
-              <tr>
-                <th style={styles.th} onClick={() => handleSort("login")}>
-                  Login <SortIndicator columnKey="login" />
-                </th>
-                <th style={styles.th} onClick={() => handleSort("totalPrompts")}>
-                  Prompts <SortIndicator columnKey="totalPrompts" />
-                </th>
-                <th style={styles.th} onClick={() => handleSort("totalGenerations")}>
-                  Generations <SortIndicator columnKey="totalGenerations" />
-                </th>
-                <th style={styles.th} onClick={() => handleSort("totalAcceptances")}>
-                  Acceptances <SortIndicator columnKey="totalAcceptances" />
-                </th>
-                <th style={styles.th} onClick={() => handleSort("totalLocAdded")}>
-                  LOC Added <SortIndicator columnKey="totalLocAdded" />
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {filteredUsers.map((user) => (
-                <tr key={user.login} style={styles.tr}>
-                  <td style={styles.td}>
-                    <a
-                      href={`https://github.com/${user.login}`}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                    >
-                      {user.login}
-                    </a>
-                  </td>
-                  <td style={styles.tdNumber}>{user.totalPrompts.toLocaleString()}</td>
-                  <td style={styles.tdNumber}>{user.totalGenerations.toLocaleString()}</td>
-                  <td style={styles.tdNumber}>{user.totalAcceptances.toLocaleString()}</td>
-                  <td style={styles.tdNumber}>{user.totalLocAdded.toLocaleString()}</td>
-                </tr>
-              ))}
-              {filteredUsers.length === 0 && (
-                <tr>
-                  <td colSpan={5} style={{ ...styles.td, textAlign: "center" }}>
-                    No users found for the selected date range.
-                  </td>
-                </tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-      </section>
+      
+      {/* Admin Recommendations */}
+      {recommendations.length > 0 && (
+        <section style={styles.recommendationsSection}>
+          <h2 style={styles.sectionTitle}>🎯 Admin Recommendations</h2>
+          <div style={styles.recommendationsGrid}>
+            {recommendations.map((rec, idx) => (
+              <RecommendationCard
+                key={idx}
+                type={rec.type}
+                title={rec.title}
+                description={rec.description}
+                count={rec.count}
+                users={rec.users}
+              />
+            ))}
+          </div>
+        </section>
+      )}
     </div>
   );
 }
 
+// ============================================================================
+// TOOLTIP STYLE
+// ============================================================================
+
+const tooltipStyle: React.CSSProperties = {
+  background: "var(--bg-elevated)",
+  border: "1px solid var(--border-subtle)",
+  borderRadius: "var(--radius-md)",
+  color: "var(--text-primary)",
+  boxShadow: "var(--shadow-lg)",
+};
+
+// ============================================================================
+// ICONS
+// ============================================================================
+
+function UsersIcon() {
+  return (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
+      <circle cx="9" cy="7" r="4" />
+      <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
+      <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+    </svg>
+  );
+}
+
+function ChatIcon() {
+  return (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+    </svg>
+  );
+}
+
+function CheckIcon() {
+  return (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <polyline points="20 6 9 17 4 12" />
+    </svg>
+  );
+}
+
+function CodeIcon() {
+  return (
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <polyline points="16 18 22 12 16 6" />
+      <polyline points="8 6 2 12 8 18" />
+    </svg>
+  );
+}
+
+function DollarIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <line x1="12" y1="1" x2="12" y2="23" />
+      <path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6" />
+    </svg>
+  );
+}
+
+// ============================================================================
+// STYLES
+// ============================================================================
+
 const styles: { [key: string]: React.CSSProperties } = {
-  container: {
-    maxWidth: "1400px",
-    margin: "0 auto",
-    padding: "2rem",
+  page: {
+    padding: "1.5rem 2rem 3rem",
+    maxWidth: "1600px",
   },
-  header: {
-    marginBottom: "2rem",
+  pageHeader: {
+    marginBottom: "1.5rem",
   },
-  title: {
-    fontSize: "2rem",
+  pageTitle: {
+    fontSize: "1.5rem",
     fontWeight: 700,
-    marginBottom: "0.5rem",
+    color: "var(--text-primary)",
+    margin: 0,
   },
-  subtitle: {
-    color: "var(--muted)",
+  pageSubtitle: {
     fontSize: "0.875rem",
+    color: "var(--text-muted)",
+    marginTop: "0.25rem",
   },
-  loadingContainer: {
-    display: "flex",
-    flexDirection: "column",
-    alignItems: "center",
-    justifyContent: "center",
-    minHeight: "100vh",
-    gap: "1rem",
-  },
-  spinner: {
-    width: "40px",
-    height: "40px",
-    border: "4px solid var(--border)",
-    borderTopColor: "var(--primary)",
-    borderRadius: "50%",
-    animation: "spin 1s linear infinite",
-  },
-  errorContainer: {
-    display: "flex",
-    flexDirection: "column",
-    alignItems: "center",
-    justifyContent: "center",
-    minHeight: "100vh",
-    gap: "1rem",
-    padding: "2rem",
-    textAlign: "center",
-  },
-  retryButton: {
-    backgroundColor: "var(--primary)",
-    color: "white",
-    padding: "0.5rem 1.5rem",
-    borderRadius: "0.375rem",
-    border: "none",
-    cursor: "pointer",
-    fontWeight: 500,
-  },
-  filterSection: {
+  kpiSection: {
     marginBottom: "2rem",
+  },
+  kpiGrid: {
+    display: "grid",
+    gridTemplateColumns: "repeat(4, 1fr)",
+    gap: "1rem",
+  },
+  // Cost Section Styles
+  costSection: {
+    marginBottom: "2rem",
+    background: "var(--bg-secondary)",
+    borderRadius: "var(--radius-lg)",
     padding: "1.5rem",
-    backgroundColor: "var(--card-bg)",
-    borderRadius: "0.5rem",
-    border: "1px solid var(--border)",
+    border: "1px solid var(--border-subtle)",
+  },
+  costHeader: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "flex-start",
+    marginBottom: "1.25rem",
   },
   sectionTitle: {
-    fontSize: "1.25rem",
+    fontSize: "1.125rem",
     fontWeight: 600,
+    color: "var(--text-primary)",
+    margin: 0,
+    display: "flex",
+    alignItems: "center",
+    gap: "0.5rem",
+  },
+  sectionSubtitle: {
+    fontSize: "0.8125rem",
+    color: "var(--text-muted)",
+    marginTop: "0.25rem",
+  },
+  simulatedBadge: {
+    fontSize: "0.6875rem",
+    fontWeight: 600,
+    padding: "0.125rem 0.5rem",
+    borderRadius: "9999px",
+    background: "var(--warning-bg)",
+    color: "var(--warning)",
+  },
+  simulatorToggle: {
+    padding: "0.5rem 1rem",
+    background: "var(--bg-tertiary)",
+    border: "1px solid var(--border-subtle)",
+    borderRadius: "var(--radius-md)",
+    color: "var(--text-secondary)",
+    fontSize: "0.8125rem",
+    fontWeight: 500,
+    cursor: "pointer",
+  },
+  costGrid: {
+    display: "grid",
+    gridTemplateColumns: "repeat(4, 1fr)",
+    gap: "1rem",
+    marginBottom: "1.25rem",
+  },
+  costCard: {
+    background: "var(--bg-primary)",
+    borderRadius: "var(--radius-md)",
+    padding: "1rem",
+    border: "1px solid var(--border-subtle)",
+  },
+  costCardHeader: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: "0.5rem",
+  },
+  costLabel: {
+    fontSize: "0.75rem",
+    color: "var(--text-muted)",
+    textTransform: "uppercase",
+    letterSpacing: "0.03em",
+  },
+  costValue: {
+    fontSize: "1.5rem",
+    fontWeight: 700,
+    color: "var(--text-primary)",
+  },
+  costInr: {
+    fontSize: "0.9375rem",
+    fontWeight: 600,
+    color: "var(--accent-primary)",
+    marginTop: "0.125rem",
+  },
+  costNote: {
+    fontSize: "0.6875rem",
+    color: "var(--text-muted)",
+    marginTop: "0.375rem",
+  },
+  // Simulator Styles
+  simulator: {
+    background: "var(--bg-tertiary)",
+    borderRadius: "var(--radius-md)",
+    padding: "1.25rem",
+    marginBottom: "1.25rem",
+    border: "1px dashed var(--border-default)",
+  },
+  simulatorTitle: {
+    fontSize: "0.9375rem",
+    fontWeight: 600,
+    color: "var(--text-primary)",
+    margin: 0,
+  },
+  simulatorDesc: {
+    fontSize: "0.8125rem",
+    color: "var(--text-muted)",
+    marginTop: "0.25rem",
     marginBottom: "1rem",
   },
-  filterRow: {
-    display: "flex",
-    gap: "1rem",
-    flexWrap: "wrap",
-    alignItems: "flex-end",
+  simulatorGrid: {
+    display: "grid",
+    gridTemplateColumns: "repeat(3, 1fr)",
+    gap: "1.5rem",
+    marginBottom: "1rem",
   },
-  filterGroup: {
+  sliderGroup: {
     display: "flex",
     flexDirection: "column",
-    gap: "0.25rem",
+    gap: "0.5rem",
   },
-  label: {
-    fontSize: "0.875rem",
-    color: "var(--muted)",
+  sliderLabel: {
+    fontSize: "0.8125rem",
+    color: "var(--text-secondary)",
   },
-  input: {
-    padding: "0.5rem",
-    borderRadius: "0.375rem",
-    border: "1px solid var(--border)",
-    backgroundColor: "var(--background)",
-    color: "var(--foreground)",
+  slider: {
+    width: "100%",
+    accentColor: "var(--accent-primary)",
+  },
+  simulatorActions: {
+    display: "flex",
+    gap: "0.75rem",
+  },
+  applyButton: {
+    padding: "0.5rem 1rem",
+    background: "var(--accent-primary)",
+    border: "none",
+    borderRadius: "var(--radius-sm)",
+    color: "white",
+    fontSize: "0.8125rem",
+    fontWeight: 600,
+    cursor: "pointer",
   },
   resetButton: {
     padding: "0.5rem 1rem",
-    borderRadius: "0.375rem",
-    border: "1px solid var(--border)",
-    backgroundColor: "var(--background)",
-    color: "var(--foreground)",
+    background: "transparent",
+    border: "1px solid var(--border-default)",
+    borderRadius: "var(--radius-sm)",
+    color: "var(--text-secondary)",
+    fontSize: "0.8125rem",
+    fontWeight: 500,
     cursor: "pointer",
   },
-  summarySection: {
-    marginBottom: "2rem",
+  // Expensive Users
+  expensiveUsersSection: {
+    marginTop: "1rem",
   },
-  cardGrid: {
-    display: "grid",
-    gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))",
-    gap: "1rem",
-  },
-  card: {
-    backgroundColor: "var(--card-bg)",
-    borderRadius: "0.5rem",
-    padding: "1.5rem",
-    border: "1px solid var(--border)",
-    textAlign: "center",
-  },
-  cardValue: {
-    fontSize: "2rem",
-    fontWeight: 700,
-    color: "var(--primary)",
-  },
-  cardLabel: {
+  subsectionTitle: {
     fontSize: "0.875rem",
-    color: "var(--muted)",
-    marginTop: "0.25rem",
+    fontWeight: 600,
+    color: "var(--text-primary)",
+    marginBottom: "0.75rem",
+  },
+  expensiveUsersList: {
+    display: "flex",
+    flexDirection: "column",
+    gap: "0.5rem",
+  },
+  expensiveUserRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: "1rem",
+    padding: "0.75rem 1rem",
+    background: "var(--bg-primary)",
+    borderRadius: "var(--radius-md)",
+    border: "1px solid var(--border-subtle)",
+    cursor: "pointer",
+    transition: "all var(--transition-fast)",
+  },
+  expensiveUserRank: {
+    fontSize: "0.875rem",
+    fontWeight: 700,
+    color: "var(--text-muted)",
+    width: "2rem",
+  },
+  expensiveUserInfo: {
+    flex: 1,
+    display: "flex",
+    flexDirection: "column",
+    gap: "0.125rem",
+  },
+  expensiveUserName: {
+    fontSize: "0.875rem",
+    fontWeight: 600,
+    color: "var(--text-primary)",
+  },
+  expensiveUserStats: {
+    fontSize: "0.75rem",
+    color: "var(--text-muted)",
+  },
+  expensiveUserCost: {
+    textAlign: "right",
+    display: "flex",
+    flexDirection: "column",
+    gap: "0.125rem",
+  },
+  expensiveUserUSD: {
+    fontSize: "0.9375rem",
+    fontWeight: 700,
+    color: "var(--text-primary)",
+  },
+  expensiveUserINR: {
+    fontSize: "0.8125rem",
+    fontWeight: 600,
+    color: "var(--accent-primary)",
   },
   chartsSection: {
     marginBottom: "2rem",
   },
   chartsGrid: {
     display: "grid",
-    gridTemplateColumns: "repeat(auto-fit, minmax(400px, 1fr))",
-    gap: "1.5rem",
+    gridTemplateColumns: "repeat(2, 1fr)",
+    gap: "1.25rem",
   },
-  chartCard: {
-    backgroundColor: "var(--card-bg)",
-    borderRadius: "0.5rem",
-    padding: "1.5rem",
-    border: "1px solid var(--border)",
-  },
-  chartTitle: {
-    fontSize: "1rem",
-    fontWeight: 600,
-    marginBottom: "1rem",
-  },
-  chartContainer: {
-    width: "100%",
-    height: "300px",
-  },
-  tableSection: {
+  recommendationsSection: {
     marginBottom: "2rem",
   },
-  tableWrapper: {
-    overflow: "auto",
-    borderRadius: "0.5rem",
-    border: "1px solid var(--border)",
-  },
-  table: {
-    width: "100%",
-    borderCollapse: "collapse",
-    backgroundColor: "var(--card-bg)",
-  },
-  th: {
-    padding: "0.75rem 1rem",
-    textAlign: "left",
-    fontWeight: 600,
-    borderBottom: "1px solid var(--border)",
-    cursor: "pointer",
-    userSelect: "none",
-    whiteSpace: "nowrap",
-  },
-  tr: {
-    borderBottom: "1px solid var(--border)",
-  },
-  td: {
-    padding: "0.75rem 1rem",
-  },
-  tdNumber: {
-    padding: "0.75rem 1rem",
-    textAlign: "right",
-    fontVariantNumeric: "tabular-nums",
+  recommendationsGrid: {
+    display: "grid",
+    gridTemplateColumns: "repeat(auto-fill, minmax(320px, 1fr))",
+    gap: "1rem",
   },
 };

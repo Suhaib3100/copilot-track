@@ -1,16 +1,12 @@
 import { NextResponse } from "next/server";
-import { fetchCopilotMetrics, generateMockData } from "@/lib/copilotMetrics";
+import { 
+  fetchCopilotMetrics, 
+  getDefaultCostConfig, 
+  calculateAllUserCosts, 
+  calculateOrgCost 
+} from "@/lib/copilotMetrics";
 
-export async function GET(request: Request) {
-  // Check for mock mode via query param or env var
-  const url = new URL(request.url);
-  const useMock = url.searchParams.get("mock") === "true" || process.env.USE_MOCK_DATA === "true";
-  
-  if (useMock) {
-    console.log("Using mock data for development/testing");
-    return NextResponse.json(generateMockData());
-  }
-
+export async function GET() {
   const githubToken = process.env.GITHUB_TOKEN;
   const orgSlug = process.env.ORG_SLUG;
 
@@ -46,7 +42,23 @@ export async function GET(request: Request) {
       return NextResponse.json(result, { status: 500 });
     }
 
-    return NextResponse.json(result);
+    // Calculate costs for all users
+    const costConfig = getDefaultCostConfig();
+    const usersWithCost = calculateAllUserCosts(result.users, costConfig);
+    const orgCost = calculateOrgCost(usersWithCost, costConfig);
+
+    // Add cost to orgTotals
+    const orgTotalsWithCost = {
+      ...result.orgTotals,
+      cost: orgCost,
+    };
+
+    return NextResponse.json({
+      ...result,
+      users: usersWithCost,
+      orgTotals: orgTotalsWithCost,
+      costConfig,
+    });
   } catch (error) {
     console.error("Error in copilot-metrics API route:", error);
     return NextResponse.json(
